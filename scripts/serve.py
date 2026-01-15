@@ -15,13 +15,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve a fine-tuned Nemotron model")
     parser.add_argument(
         "--model_name",
-        default="nvidia/Nemotron-4-Mini-HF",
+        default="nvidia/Nemotron-Mini-4B-Instruct",
         help="Base model name",
     )
     parser.add_argument(
         "--adapter_dir",
-        default="outputs/adapter",
-        help="Path to LoRA adapter",
+        default="",
+        help="Optional LoRA adapter path",
     )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
@@ -53,7 +53,7 @@ class PredictResponse(BaseModel):
     raw_response: str
 
 
-def load_model(model_name: str, adapter_dir: Path):
+def load_model(model_name: str, adapter_dir: Optional[Path]):
     compute_dtype = (
         torch.bfloat16
         if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
@@ -71,7 +71,10 @@ def load_model(model_name: str, adapter_dir: Path):
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = PeftModel.from_pretrained(base, str(adapter_dir))
+    if adapter_dir:
+        model = PeftModel.from_pretrained(base, str(adapter_dir))
+    else:
+        model = base
     model.eval()
     return model, tokenizer
 
@@ -100,8 +103,8 @@ def normalize_label(text: str) -> str:
 
 
 def create_app(args: argparse.Namespace) -> FastAPI:
-    adapter_dir = Path(args.adapter_dir)
-    if not adapter_dir.exists():
+    adapter_dir = Path(args.adapter_dir) if args.adapter_dir else None
+    if adapter_dir and not adapter_dir.exists():
         raise SystemExit(f"Adapter directory not found: {adapter_dir}")
 
     model, tokenizer = load_model(args.model_name, adapter_dir)

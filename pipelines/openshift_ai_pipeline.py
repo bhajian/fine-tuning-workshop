@@ -31,8 +31,12 @@ def _container_op(name, image, command, args, pvol):
 def nemotron_workshop_pipeline(
     workshop_image: str = "quay.io/your-org/nemotron-workshop:latest",
     pvc_name: str = "nemotron-workspace",
-    model_name: str = "nvidia/Nemotron-4-Mini-HF",
+    model_name: str = "nvidia/Nemotron-Mini-4B-Instruct",
     max_emails: int = 50000,
+    finetune_backend: str = "trl",
+    tuning_method: str = "lora",
+    nvidia_library: str = "nemo",
+    nvidia_command: str = "",
 ):
     volume = dsl.PipelineVolume(pvc=pvc_name)
 
@@ -70,6 +74,14 @@ def nemotron_workshop_pipeline(
             "/workspace/outputs",
             "--model_name",
             model_name,
+            "--backend",
+            finetune_backend,
+            "--tuning_method",
+            tuning_method,
+            "--nvidia_library",
+            nvidia_library,
+            "--nvidia_command",
+            nvidia_command,
         ],
         pvol=volume,
     )
@@ -83,6 +95,8 @@ def nemotron_workshop_pipeline(
             "/workspace/data/processed/test.jsonl",
             "--adapter_dir",
             "/workspace/outputs/adapter",
+            "--sft_model_dir",
+            "/workspace/outputs/sft_model",
             "--model_name",
             model_name,
         ],
@@ -97,6 +111,8 @@ def nemotron_workshop_pipeline(
             "--local",
             "--adapter_dir",
             "/workspace/outputs/adapter",
+            "--sft_model_dir",
+            "/workspace/outputs/sft_model",
             "--model_name",
             model_name,
         ],

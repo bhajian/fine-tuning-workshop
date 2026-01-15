@@ -19,19 +19,35 @@ def parse_args() -> argparse.Namespace:
         help="Prediction endpoint",
     )
     parser.add_argument(
+        "--api",
+        choices=["predict", "openai"],
+        default="predict",
+        help="Endpoint type: custom /predict or OpenAI-compatible completions",
+    )
+    parser.add_argument(
         "--local",
         action="store_true",
         help="Run local inference instead of calling the endpoint",
     )
     parser.add_argument(
         "--model_name",
-        default="nvidia/Nemotron-4-Mini-HF",
+        default="nvidia/Nemotron-Mini-4B-Instruct",
         help="Base model name for local inference",
+    )
+    parser.add_argument(
+        "--openai_model",
+        default="",
+        help="Model name to send to the OpenAI-compatible endpoint",
     )
     parser.add_argument(
         "--adapter_dir",
         default="",
         help="LoRA adapter path for local inference",
+    )
+    parser.add_argument(
+        "--sft_model_dir",
+        default="",
+        help="Full SFT model path for local inference",
     )
     parser.add_argument("--num_requests", type=int, default=50)
     parser.add_argument("--concurrency", type=int, default=4)
@@ -50,7 +66,7 @@ def build_prompt() -> str:
     )
 
 
-def load_local_model(model_name: str, adapter_dir: Path):
+def load_local_model(model_name: str, adapter_dir: Path | None):
     compute_dtype = (
         torch.bfloat16
         if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
@@ -68,7 +84,10 @@ def load_local_model(model_name: str, adapter_dir: Path):
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = PeftModel.from_pretrained(base, str(adapter_dir))
+    if adapter_dir:
+        model = PeftModel.from_pretrained(base, str(adapter_dir))
+    else:
+        model = base
     model.eval()
     return model, tokenizer
 
@@ -77,6 +96,20 @@ def send_request(endpoint: str) -> float:
     payload = {
         "subject": "Account verification required",
         "body": "Please verify your account to avoid suspension. Click the link.",
+    }
+    start = time.perf_counter()
+    response = requests.post(endpoint, json=payload, timeout=60)
+    response.raise_for_status()
+    end = time.perf_counter()
+    return end - start
+
+
+def send_openai_request(endpoint: str, model: str) -> float:
+    payload = {
+        "model": model,
+        "prompt": build_prompt(),
+        "max_tokens": 6,
+        "temperature": 0.0,
     }
     start = time.perf_counter()
     response = requests.post(endpoint, json=payload, timeout=60)
@@ -105,13 +138,25 @@ def main() -> None:
 
     model = tokenizer = None
     if args.local:
-        if not args.adapter_dir:
-            raise SystemExit("--adapter_dir is required for local benchmarking")
-        model, tokenizer = load_local_model(args.model_name, Path(args.adapter_dir))
+        model_name = args.model_name
+        adapter_dir = Path(args.adapter_dir) if args.adapter_dir else None
+        if args.sft_model_dir:
+            sft_dir = Path(args.sft_model_dir)
+            if not sft_dir.exists():
+                raise SystemExit(f"SFT model directory not found: {sft_dir}")
+            model_name = str(sft_dir)
+            adapter_dir = None
+        if not adapter_dir and not args.sft_model_dir:
+            raise SystemExit("--adapter_dir or --sft_model_dir is required for local benchmarking")
+        model, tokenizer = load_local_model(model_name, adapter_dir)
+
+    openai_model = args.openai_model or args.model_name
 
     for _ in range(args.warmup):
         if args.local:
             send_local(model, tokenizer)
+        elif args.api == "openai":
+            send_openai_request(args.endpoint, openai_model)
         else:
             send_request(args.endpoint)
 
@@ -120,6 +165,11 @@ def main() -> None:
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         if args.local:
             futures = [pool.submit(send_local, model, tokenizer) for _ in range(args.num_requests)]
+        elif args.api == "openai":
+            futures = [
+                pool.submit(send_openai_request, args.endpoint, openai_model)
+                for _ in range(args.num_requests)
+            ]
         else:
             futures = [pool.submit(send_request, args.endpoint) for _ in range(args.num_requests)]
         for future in as_completed(futures):

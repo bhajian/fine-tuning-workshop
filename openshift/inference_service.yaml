@@ -9,7 +9,7 @@ spec:
         image: quay.io/your-org/nemotron-phishing-serve:latest
         args:
           - "--model_name"
-          - "nvidia/Nemotron-4-Mini-HF"
+          - "nvidia/Nemotron-Mini-4B-Instruct"
           - "--adapter_dir"
           - "/models/adapter"
         env:

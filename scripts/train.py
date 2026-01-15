@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
+import os
+import subprocess
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import torch
 from datasets import load_dataset
@@ -16,10 +18,10 @@ from trl import SFTTrainer
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fine-tune Nemotron with LoRA")
+    parser = argparse.ArgumentParser(description="Fine-tune Nemotron with LoRA or SFT")
     parser.add_argument(
         "--model_name",
-        default="nvidia/Nemotron-4-Mini-HF",
+        default="nvidia/Nemotron-Mini-4B-Instruct",
         help="Hugging Face model name",
     )
     parser.add_argument(
@@ -31,6 +33,32 @@ def parse_args() -> argparse.Namespace:
         "--output_dir",
         default="outputs",
         help="Output directory for adapters and logs",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["trl", "nvidia"],
+        default="trl",
+        help="Training backend: TRL/PEFT or an NVIDIA command",
+    )
+    parser.add_argument(
+        "--tuning_method",
+        choices=["lora", "sft"],
+        default="lora",
+        help="Fine-tuning method: LoRA adapters or full SFT",
+    )
+    parser.add_argument(
+        "--nvidia_library",
+        choices=["nemo", "nemo-run", "custom"],
+        default="nemo",
+        help="NVIDIA library label when using the NVIDIA backend",
+    )
+    parser.add_argument(
+        "--nvidia_command",
+        default="",
+        help=(
+            "Shell command to run when backend=nvidia. The command receives "
+            "DATA_DIR, OUTPUT_DIR, MODEL_NAME, and TUNING_METHOD env vars."
+        ),
     )
     parser.add_argument("--max_seq_length", type=int, default=1024)
     parser.add_argument("--per_device_train_batch_size", type=int, default=2)
@@ -64,7 +92,7 @@ def resolve_bf16(force_bf16: bool, disable_bf16: bool) -> bool:
     return torch.cuda.is_available() and torch.cuda.is_bf16_supported()
 
 
-def build_quant_config(use_4bit: bool, bf16: bool) -> BitsAndBytesConfig:
+def build_quant_config(use_4bit: bool, bf16: bool) -> Optional[BitsAndBytesConfig]:
     if not use_4bit:
         return None
     compute_dtype = torch.bfloat16 if bf16 else torch.float16
@@ -76,13 +104,45 @@ def build_quant_config(use_4bit: bool, bf16: bool) -> BitsAndBytesConfig:
     )
 
 
+def run_nvidia_backend(args: argparse.Namespace, data_dir: Path, output_dir: Path) -> None:
+    command = args.nvidia_command or os.environ.get("NVIDIA_TRAIN_CMD", "")
+    if not command:
+        raise SystemExit(
+            "NVIDIA backend selected but no command provided. "
+            "Use --nvidia_command or set NVIDIA_TRAIN_CMD."
+        )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "DATA_DIR": str(data_dir.resolve()),
+            "OUTPUT_DIR": str(output_dir.resolve()),
+            "MODEL_NAME": args.model_name,
+            "TUNING_METHOD": args.tuning_method,
+            "NVIDIA_LIBRARY": args.nvidia_library,
+            "MAX_SEQ_LENGTH": str(args.max_seq_length),
+            "TRAIN_BATCH_SIZE": str(args.per_device_train_batch_size),
+            "EVAL_BATCH_SIZE": str(args.per_device_eval_batch_size),
+            "GRADIENT_ACCUMULATION_STEPS": str(args.gradient_accumulation_steps),
+            "NUM_TRAIN_EPOCHS": str(args.num_train_epochs),
+            "LEARNING_RATE": str(args.learning_rate),
+        }
+    )
+
+    subprocess.run(command, shell=True, check=True, env=env)
+
+
 def main() -> None:
     args = parse_args()
     data_dir = Path(args.data_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if args.backend == "nvidia":
+        run_nvidia_backend(args, data_dir, output_dir)
+        return
+
     bf16 = resolve_bf16(args.bf16, args.no_bf16)
-    use_4bit = not args.no_4bit
+    use_4bit = args.tuning_method == "lora" and not args.no_4bit
 
     train_file = data_dir / "train.jsonl"
     val_file = data_dir / "val.jsonl"
@@ -107,14 +167,16 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    lora_config = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-        target_modules=args.target_modules,
-    )
+    lora_config = None
+    if args.tuning_method == "lora":
+        lora_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+            target_modules=args.target_modules,
+        )
 
     training_args = TrainingArguments(
         output_dir=str(output_dir),
@@ -148,10 +210,16 @@ def main() -> None:
 
     trainer.train()
 
-    adapter_dir = output_dir / "adapter"
-    trainer.model.save_pretrained(adapter_dir)
-    tokenizer.save_pretrained(adapter_dir)
-    print(f"Saved LoRA adapter to {adapter_dir}")
+    if args.tuning_method == "lora":
+        adapter_dir = output_dir / "adapter"
+        trainer.model.save_pretrained(adapter_dir)
+        tokenizer.save_pretrained(adapter_dir)
+        print(f"Saved LoRA adapter to {adapter_dir}")
+    else:
+        sft_dir = output_dir / "sft_model"
+        trainer.model.save_pretrained(sft_dir)
+        tokenizer.save_pretrained(sft_dir)
+        print(f"Saved SFT model to {sft_dir}")
 
 
 if __name__ == "__main__":

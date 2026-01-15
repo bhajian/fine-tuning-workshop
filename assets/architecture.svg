@@ -28,7 +28,7 @@
 
   <rect x="680" y="150" width="300" height="130" class="accent" />
   <text x="830" y="200" text-anchor="middle" class="label">LoRA Fine-Tune</text>
-  <text x="830" y="228" text-anchor="middle" class="label small">Nemotron-4-Mini-HF</text>
+  <text x="830" y="228" text-anchor="middle" class="label small">Nemotron-Mini-4B-Instruct</text>
   <text x="830" y="255" text-anchor="middle" class="label small">Adapter Output</text>
 
   <rect x="60" y="340" width="280" height="120" class="serve" />

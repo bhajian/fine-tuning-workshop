@@ -1,0 +1,2 @@
+# vLLM serving dependencies
+vllm>=0.5.0

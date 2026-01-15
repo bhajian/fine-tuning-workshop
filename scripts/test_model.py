@@ -18,14 +18,30 @@ def parse_args() -> argparse.Namespace:
         help="Prediction endpoint",
     )
     parser.add_argument(
+        "--api",
+        choices=["predict", "openai"],
+        default="predict",
+        help="Endpoint type: custom /predict or OpenAI-compatible completions",
+    )
+    parser.add_argument(
         "--model_name",
-        default="nvidia/Nemotron-4-Mini-HF",
+        default="nvidia/Nemotron-Mini-4B-Instruct",
         help="Base model name for local inference",
+    )
+    parser.add_argument(
+        "--openai_model",
+        default="",
+        help="Model name to send to the OpenAI-compatible endpoint",
     )
     parser.add_argument(
         "--adapter_dir",
         default="",
         help="Optional LoRA adapter path for local inference",
+    )
+    parser.add_argument(
+        "--sft_model_dir",
+        default="",
+        help="Optional full SFT model path for local inference",
     )
     parser.add_argument(
         "--test_file",
@@ -47,7 +63,7 @@ def build_prompt(subject: str, body: str) -> str:
     )
 
 
-def load_local_model(model_name: str, adapter_dir: Path):
+def load_local_model(model_name: str, adapter_dir: Optional[Path]):
     compute_dtype = (
         torch.bfloat16
         if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
@@ -65,7 +81,10 @@ def load_local_model(model_name: str, adapter_dir: Path):
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = PeftModel.from_pretrained(base, str(adapter_dir))
+    if adapter_dir:
+        model = PeftModel.from_pretrained(base, str(adapter_dir))
+    else:
+        model = base
     model.eval()
     return model, tokenizer
 
@@ -86,6 +105,25 @@ def local_predict(model, tokenizer, subject: str, body: str):
     return {"label": label, "raw_response": raw}
 
 
+def openai_predict(endpoint: str, model: str, prompt: str) -> str:
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "max_tokens": 6,
+        "temperature": 0.0,
+    }
+    response = requests.post(endpoint, json=payload, timeout=60)
+    response.raise_for_status()
+    data = response.json()
+    choices = data.get("choices", [])
+    if not choices:
+        raise RuntimeError("OpenAI response missing choices")
+    text = choices[0].get("text")
+    if text is None:
+        text = choices[0].get("message", {}).get("content", "")
+    return text.strip()
+
+
 def remote_predict(endpoint: str, subject: str, body: str):
     payload = {"subject": subject, "body": body}
     response = requests.post(endpoint, json=payload, timeout=30)
@@ -93,7 +131,22 @@ def remote_predict(endpoint: str, subject: str, body: str):
     return response.json()
 
 
-def run_examples(endpoint: str, model=None, tokenizer=None) -> None:
+def normalize_label(text: str) -> str:
+    lowered = text.lower()
+    if "phish" in lowered:
+        return "phishing"
+    if "benign" in lowered or "ham" in lowered:
+        return "benign"
+    return "unknown"
+
+
+def run_examples(
+    endpoint: str,
+    api: str,
+    openai_model: str,
+    model=None,
+    tokenizer=None,
+) -> None:
     samples = [
         {
             "subject": "Verify your payroll account",
@@ -107,6 +160,10 @@ def run_examples(endpoint: str, model=None, tokenizer=None) -> None:
     for sample in samples:
         if model is not None:
             result = local_predict(model, tokenizer, sample["subject"], sample["body"])
+        elif api == "openai":
+            prompt = build_prompt(sample["subject"], sample["body"])
+            raw = openai_predict(endpoint, openai_model, prompt)
+            result = {"label": normalize_label(raw), "raw_response": raw}
         else:
             result = remote_predict(endpoint, sample["subject"], sample["body"])
         print(f"Subject: {sample['subject']}")
@@ -116,6 +173,8 @@ def run_examples(endpoint: str, model=None, tokenizer=None) -> None:
 
 def run_test_file(
     endpoint: str,
+    api: str,
+    openai_model: str,
     test_file: Path,
     max_samples: int,
     model=None,
@@ -130,6 +189,10 @@ def run_test_file(
             row = json.loads(line)
             if model is not None:
                 result = local_predict(model, tokenizer, row.get("subject", ""), row.get("body", ""))
+            elif api == "openai":
+                prompt = build_prompt(row.get("subject", ""), row.get("body", ""))
+                raw = openai_predict(endpoint, openai_model, prompt)
+                result = {"label": normalize_label(raw), "raw_response": raw}
             else:
                 result = remote_predict(endpoint, row.get("subject", ""), row.get("body", ""))
             pred = result.get("label")
@@ -146,12 +209,29 @@ def run_test_file(
 def main() -> None:
     args = parse_args()
     model = tokenizer = None
-    if args.adapter_dir:
-        model, tokenizer = load_local_model(args.model_name, Path(args.adapter_dir))
+    adapter_dir = Path(args.adapter_dir) if args.adapter_dir else None
+    model_name = args.model_name
+    if args.sft_model_dir:
+        sft_dir = Path(args.sft_model_dir)
+        if not sft_dir.exists():
+            raise SystemExit(f"SFT model directory not found: {sft_dir}")
+        model_name = str(sft_dir)
+        adapter_dir = None
+    if adapter_dir or args.sft_model_dir:
+        model, tokenizer = load_local_model(model_name, adapter_dir)
+    openai_model = args.openai_model or args.model_name
     if args.test_file:
-        run_test_file(args.endpoint, Path(args.test_file), args.max_samples, model, tokenizer)
+        run_test_file(
+            args.endpoint,
+            args.api,
+            openai_model,
+            Path(args.test_file),
+            args.max_samples,
+            model,
+            tokenizer,
+        )
     else:
-        run_examples(args.endpoint, model, tokenizer)
+        run_examples(args.endpoint, args.api, openai_model, model, tokenizer)
 
 
 if __name__ == "__main__":
