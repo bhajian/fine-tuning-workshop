@@ -60,6 +60,18 @@ This workshop walks you through fine-tuning a Nemotron model on the Enron email 
   ```
   The NVIDIA command receives `DATA_DIR`, `OUTPUT_DIR`, `MODEL_NAME`, and `TUNING_METHOD` env vars.
 
+## NeMo Stack (NeMo Framework Launcher)
+If you use the NeMo Framework Launcher, the default NeMo backend runs `scripts/nemo_launcher_finetune.sh`.
+Set the launcher path and run:
+```bash
+export NEMO_FRAMEWORK_LAUNCHER_DIR=/opt/NeMo-Framework-Launcher
+python scripts/train.py --backend nemo --tuning_method lora
+```
+Notes:
+- The NeMo launcher expects JSONL fields `input` and `output` (added by `scripts/prepare_jsonl.py`).
+- `MODEL_NAME` should point to a NeMo `.nemo` checkpoint or a supported NeMo restore path.
+- Override devices, batch sizes, or other settings via env vars like `TRAINER_DEVICES` or `NEMO_EXTRA_ARGS`.
+
 ## Workshop Notebooks
 - `notebooks/01_workshop_fine_tune.ipynb`: end-to-end fine-tuning walkthrough
 - `notebooks/02_openshift_ai_infer.ipynb`: call an OpenShift AI endpoint

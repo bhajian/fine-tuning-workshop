@@ -36,9 +36,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--backend",
-        choices=["trl", "nvidia"],
+        choices=["trl", "nvidia", "nemo"],
         default="trl",
-        help="Training backend: TRL/PEFT or an NVIDIA command",
+        help="Training backend: TRL/PEFT or an NVIDIA/NeMo command",
     )
     parser.add_argument(
         "--tuning_method",
@@ -50,13 +50,13 @@ def parse_args() -> argparse.Namespace:
         "--nvidia_library",
         choices=["nemo", "nemo-run", "custom"],
         default="nemo",
-        help="NVIDIA library label when using the NVIDIA backend",
+        help="NVIDIA library label when using the NVIDIA/NeMo backend",
     )
     parser.add_argument(
         "--nvidia_command",
         default="",
         help=(
-            "Shell command to run when backend=nvidia. The command receives "
+            "Shell command to run when backend=nvidia/nemo. The command receives "
             "DATA_DIR, OUTPUT_DIR, MODEL_NAME, and TUNING_METHOD env vars."
         ),
     )
@@ -104,12 +104,16 @@ def build_quant_config(use_4bit: bool, bf16: bool) -> Optional[BitsAndBytesConfi
     )
 
 
-def run_nvidia_backend(args: argparse.Namespace, data_dir: Path, output_dir: Path) -> None:
+def run_external_backend(args: argparse.Namespace, data_dir: Path, output_dir: Path) -> None:
+    script_dir = Path(__file__).resolve().parent
+    default_nemo_cmd = f"bash {script_dir / 'nemo_launcher_finetune.sh'}"
     command = args.nvidia_command or os.environ.get("NVIDIA_TRAIN_CMD", "")
+    if args.backend == "nemo":
+        command = command or os.environ.get("NEMO_TRAIN_CMD", "") or default_nemo_cmd
     if not command:
         raise SystemExit(
-            "NVIDIA backend selected but no command provided. "
-            "Use --nvidia_command or set NVIDIA_TRAIN_CMD."
+            f"{args.backend} backend selected but no command provided. "
+            "Use --nvidia_command or set NVIDIA_TRAIN_CMD/NEMO_TRAIN_CMD."
         )
 
     env = os.environ.copy()
@@ -137,8 +141,8 @@ def main() -> None:
     data_dir = Path(args.data_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    if args.backend == "nvidia":
-        run_nvidia_backend(args, data_dir, output_dir)
+    if args.backend in {"nvidia", "nemo"}:
+        run_external_backend(args, data_dir, output_dir)
         return
 
     bf16 = resolve_bf16(args.bf16, args.no_bf16)

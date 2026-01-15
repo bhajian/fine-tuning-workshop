@@ -118,7 +118,7 @@ def label_email(text: str, threshold: int) -> str:
     return "phishing" if score >= threshold else "benign"
 
 
-def build_training_text(subject: str, body: str, label: str) -> str:
+def build_prompt(subject: str, body: str) -> str:
     return (
         "### Instruction:\n"
         "Classify the email as phishing or benign. Reply with only the label.\n"
@@ -126,8 +126,11 @@ def build_training_text(subject: str, body: str, label: str) -> str:
         f"Subject: {subject}\n"
         f"Body: {body}\n"
         "### Response:\n"
-        f"{label}"
     )
+
+
+def build_training_text(subject: str, body: str, label: str) -> str:
+    return f"{build_prompt(subject, body)}{label}"
 
 
 def main() -> None:
@@ -162,6 +165,8 @@ def main() -> None:
                 "body": body,
                 "label": label,
                 "text": build_training_text(subject, body, label),
+                "input": build_prompt(subject, body),
+                "output": label,
             }
         )
 
