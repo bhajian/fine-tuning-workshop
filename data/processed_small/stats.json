@@ -1,0 +1,8 @@
+{
+  "total": 5000,
+  "train": 4000,
+  "val": 500,
+  "test": 500,
+  "phishing": 649,
+  "benign": 4351
+}

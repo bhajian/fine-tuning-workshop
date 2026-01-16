@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import inspect
 import os
 import subprocess
 from pathlib import Path
@@ -14,7 +15,11 @@ from transformers import (
     BitsAndBytesConfig,
     TrainingArguments,
 )
-from trl import SFTTrainer
+try:
+    from trl import SFTConfig, SFTTrainer
+except ImportError:
+    from trl import SFTTrainer
+    SFTConfig = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -182,35 +187,69 @@ def main() -> None:
             target_modules=args.target_modules,
         )
 
-    training_args = TrainingArguments(
-        output_dir=str(output_dir),
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_eval_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        num_train_epochs=args.num_train_epochs,
-        learning_rate=args.learning_rate,
-        logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
-        eval_steps=args.eval_steps,
-        evaluation_strategy="steps",
-        save_strategy="steps",
-        report_to="none",
-        bf16=bf16,
-        fp16=not bf16,
-        gradient_checkpointing=True,
-    )
+    base_args_kwargs = {
+        "output_dir": str(output_dir),
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "per_device_eval_batch_size": args.per_device_eval_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "num_train_epochs": args.num_train_epochs,
+        "learning_rate": args.learning_rate,
+        "logging_steps": args.logging_steps,
+        "save_steps": args.save_steps,
+        "eval_steps": args.eval_steps,
+        "save_strategy": "steps",
+        "report_to": "none",
+        "bf16": bf16,
+        "fp16": not bf16,
+        "gradient_checkpointing": True,
+    }
+    training_args_kwargs = dict(base_args_kwargs)
+    if "eval_strategy" in inspect.signature(TrainingArguments.__init__).parameters:
+        training_args_kwargs["eval_strategy"] = "steps"
+    else:
+        training_args_kwargs["evaluation_strategy"] = "steps"
 
-    trainer = SFTTrainer(
-        model=model,
-        train_dataset=dataset["train"],
-        eval_dataset=dataset["validation"],
-        args=training_args,
-        peft_config=lora_config,
-        dataset_text_field="text",
-        tokenizer=tokenizer,
-        max_seq_length=args.max_seq_length,
-        packing=True,
-    )
+    training_args = TrainingArguments(**training_args_kwargs)
+
+    trainer_kwargs = {
+        "model": model,
+        "train_dataset": dataset["train"],
+        "eval_dataset": dataset["validation"],
+        "peft_config": lora_config,
+    }
+    if "dataset_text_field" in inspect.signature(SFTTrainer.__init__).parameters:
+        trainer_kwargs.update(
+            {
+                "args": training_args,
+                "dataset_text_field": "text",
+                "tokenizer": tokenizer,
+                "max_seq_length": args.max_seq_length,
+                "packing": True,
+            }
+        )
+    else:
+        if SFTConfig is None:
+            raise SystemExit("Installed trl version requires SFTConfig but it is missing.")
+        sft_kwargs = dict(base_args_kwargs)
+        if "eval_strategy" in inspect.signature(SFTConfig.__init__).parameters:
+            sft_kwargs["eval_strategy"] = "steps"
+        else:
+            sft_kwargs["evaluation_strategy"] = "steps"
+        sft_kwargs.update(
+            {
+                "max_length": args.max_seq_length,
+                "packing": True,
+                "dataset_text_field": "text",
+            }
+        )
+        trainer_kwargs.update(
+            {
+                "args": SFTConfig(**sft_kwargs),
+                "processing_class": tokenizer,
+            }
+        )
+
+    trainer = SFTTrainer(**trainer_kwargs)
 
     trainer.train()
 

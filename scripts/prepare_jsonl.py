@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import argparse
+import csv
 import json
 import random
 import re
+import sys
 from email import policy
-from email.parser import BytesParser
+from email.parser import BytesParser, Parser
 from pathlib import Path
 from typing import Iterable, Tuple
 
@@ -36,7 +38,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input_dir",
         default="data/raw/maildir",
-        help="Path to the maildir dataset",
+        help="Path to the maildir dataset (ignored if --input_csv is set)",
+    )
+    parser.add_argument(
+        "--input_csv",
+        default=None,
+        help="Path to the emails.csv dataset",
     )
     parser.add_argument(
         "--output_dir",
@@ -76,10 +83,22 @@ def iter_email_files(maildir: Path) -> Iterable[Path]:
             yield path
 
 
-def extract_subject_body(path: Path, max_chars: int) -> Tuple[str, str]:
-    with path.open("rb") as handle:
-        message = BytesParser(policy=policy.default).parse(handle)
+def normalize_subject_body(subject: str, body: str, max_chars: int) -> Tuple[str, str]:
+    subject = subject.strip()
+    body = body.strip()
 
+    # Normalize to ASCII to keep JSONL portable.
+    subject = subject.encode("ascii", "ignore").decode("ascii")
+    body = body.encode("ascii", "ignore").decode("ascii")
+
+    body = re.sub(r"\s+", " ", body)
+    if len(body) > max_chars:
+        body = body[:max_chars]
+
+    return subject, body
+
+
+def extract_subject_body_from_message(message, max_chars: int) -> Tuple[str, str]:
     subject = message.get("subject") or ""
     body_parts = []
     if message.is_multipart():
@@ -96,18 +115,35 @@ def extract_subject_body(path: Path, max_chars: int) -> Tuple[str, str]:
             body_parts.append("")
 
     body = "\n".join(body_parts)
-    subject = subject.strip()
-    body = body.strip()
+    return normalize_subject_body(subject, body, max_chars)
 
-    # Normalize to ASCII to keep JSONL portable.
-    subject = subject.encode("ascii", "ignore").decode("ascii")
-    body = body.encode("ascii", "ignore").decode("ascii")
 
-    body = re.sub(r"\s+", " ", body)
-    if len(body) > max_chars:
-        body = body[:max_chars]
+def extract_subject_body(path: Path, max_chars: int) -> Tuple[str, str]:
+    with path.open("rb") as handle:
+        message = BytesParser(policy=policy.default).parse(handle)
+    return extract_subject_body_from_message(message, max_chars)
 
-    return subject, body
+
+def extract_subject_body_from_string(message_text: str, max_chars: int) -> Tuple[str, str]:
+    message = Parser(policy=policy.default).parsestr(message_text)
+    return extract_subject_body_from_message(message, max_chars)
+
+
+def iter_email_messages(csv_path: Path) -> Iterable[str]:
+    try:
+        csv.field_size_limit(sys.maxsize)
+    except OverflowError:
+        csv.field_size_limit(2**31 - 1)
+    with csv_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            raise SystemExit("CSV appears to be empty or missing headers")
+        if "message" not in reader.fieldnames:
+            raise SystemExit("CSV missing required 'message' column")
+        for row in reader:
+            message = row.get("message")
+            if message:
+                yield message
 
 
 def label_email(text: str, threshold: int) -> str:
@@ -139,28 +175,27 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not input_dir.exists():
-        raise SystemExit(f"Input directory not found: {input_dir}")
-
-    files = list(iter_email_files(input_dir))
-    if not files:
-        raise SystemExit("No email files found under maildir")
-
-    random.Random(args.seed).shuffle(files)
-    files = files[: args.max_emails]
-
+    rng = random.Random(args.seed)
     records = []
-    for path in tqdm(files, desc="Parsing emails"):
-        try:
-            subject, body = extract_subject_body(path, args.max_chars)
-        except Exception:
-            continue
-        if not body:
-            continue
-        text_for_label = f"{subject} {body}"
-        label = label_email(text_for_label, args.phish_threshold)
-        records.append(
-            {
+
+    if args.input_csv:
+        input_csv = Path(args.input_csv)
+        if not input_csv.exists():
+            raise SystemExit(f"Input CSV not found: {input_csv}")
+
+        seen = 0
+        for message_text in tqdm(iter_email_messages(input_csv), desc="Parsing emails"):
+            try:
+                subject, body = extract_subject_body_from_string(
+                    message_text, args.max_chars
+                )
+            except Exception:
+                continue
+            if not body:
+                continue
+            text_for_label = f"{subject} {body}"
+            label = label_email(text_for_label, args.phish_threshold)
+            record = {
                 "subject": subject,
                 "body": body,
                 "label": label,
@@ -168,7 +203,44 @@ def main() -> None:
                 "input": build_prompt(subject, body),
                 "output": label,
             }
-        )
+
+            seen += 1
+            if len(records) < args.max_emails:
+                records.append(record)
+                continue
+            pick = rng.randint(0, seen - 1)
+            if pick < args.max_emails:
+                records[pick] = record
+    else:
+        if not input_dir.exists():
+            raise SystemExit(f"Input directory not found: {input_dir}")
+
+        files = list(iter_email_files(input_dir))
+        if not files:
+            raise SystemExit("No email files found under maildir")
+
+        rng.shuffle(files)
+        files = files[: args.max_emails]
+
+        for path in tqdm(files, desc="Parsing emails"):
+            try:
+                subject, body = extract_subject_body(path, args.max_chars)
+            except Exception:
+                continue
+            if not body:
+                continue
+            text_for_label = f"{subject} {body}"
+            label = label_email(text_for_label, args.phish_threshold)
+            records.append(
+                {
+                    "subject": subject,
+                    "body": body,
+                    "label": label,
+                    "text": build_training_text(subject, body, label),
+                    "input": build_prompt(subject, body),
+                    "output": label,
+                }
+            )
 
     if not records:
         raise SystemExit("No usable emails parsed")

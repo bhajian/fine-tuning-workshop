@@ -9,3 +9,5 @@ __pycache__/
 
 # Notebooks
 .ipynb_checkpoints/
+
+.venv

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -47,6 +48,11 @@ def parse_args() -> argparse.Namespace:
         "--test_file",
         default="",
         help="Optional JSONL test file with subject/body/label",
+    )
+    parser.add_argument(
+        "--output_file",
+        default="",
+        help="Optional JSON output file for accuracy results",
     )
     parser.add_argument("--max_samples", type=int, default=20)
     return parser.parse_args()
@@ -179,7 +185,7 @@ def run_test_file(
     max_samples: int,
     model=None,
     tokenizer=None,
-) -> None:
+) -> dict:
     correct = 0
     total = 0
     with test_file.open("r", encoding="utf-8") as handle:
@@ -204,6 +210,7 @@ def run_test_file(
         print(f"Accuracy on {total} samples: {correct / total:.2%}")
     else:
         print("No samples evaluated.")
+    return {"correct": correct, "total": total, "accuracy": (correct / total) if total else 0.0}
 
 
 def main() -> None:
@@ -221,7 +228,7 @@ def main() -> None:
         model, tokenizer = load_local_model(model_name, adapter_dir)
     openai_model = args.openai_model or args.model_name
     if args.test_file:
-        run_test_file(
+        result = run_test_file(
             args.endpoint,
             args.api,
             openai_model,
@@ -230,6 +237,24 @@ def main() -> None:
             model,
             tokenizer,
         )
+        if args.output_file:
+            payload = {
+                "correct": result["correct"],
+                "total": result["total"],
+                "accuracy": result["accuracy"],
+                "endpoint": args.endpoint,
+                "api": args.api,
+                "model_name": args.model_name,
+                "openai_model": openai_model,
+                "adapter_dir": args.adapter_dir,
+                "sft_model_dir": args.sft_model_dir,
+                "test_file": args.test_file,
+                "max_samples": args.max_samples,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            output_path = Path(args.output_file)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json.dumps(payload, indent=2))
     else:
         run_examples(args.endpoint, args.api, openai_model, model, tokenizer)
 
