@@ -4,22 +4,6 @@ import inspect
 import os
 import subprocess
 from pathlib import Path
-from typing import List, Optional
-
-import torch
-from datasets import load_dataset
-from peft import LoraConfig
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    TrainingArguments,
-)
-try:
-    from trl import SFTConfig, SFTTrainer
-except ImportError:
-    from trl import SFTTrainer
-    SFTConfig = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,6 +74,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_bf16(force_bf16: bool, disable_bf16: bool) -> bool:
+    import torch
+
     if disable_bf16:
         return False
     if force_bf16:
@@ -97,9 +83,12 @@ def resolve_bf16(force_bf16: bool, disable_bf16: bool) -> bool:
     return torch.cuda.is_available() and torch.cuda.is_bf16_supported()
 
 
-def build_quant_config(use_4bit: bool, bf16: bool) -> Optional[BitsAndBytesConfig]:
+def build_quant_config(use_4bit: bool, bf16: bool):
     if not use_4bit:
         return None
+    import torch
+    from transformers import BitsAndBytesConfig
+
     compute_dtype = torch.bfloat16 if bf16 else torch.float16
     return BitsAndBytesConfig(
         load_in_4bit=True,
@@ -149,6 +138,16 @@ def main() -> None:
     if args.backend in {"nvidia", "nemo"}:
         run_external_backend(args, data_dir, output_dir)
         return
+
+    import torch
+    from datasets import load_dataset
+    from peft import LoraConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+    try:
+        from trl import SFTConfig, SFTTrainer
+    except ImportError:
+        from trl import SFTTrainer
+        SFTConfig = None
 
     bf16 = resolve_bf16(args.bf16, args.no_bf16)
     use_4bit = args.tuning_method == "lora" and not args.no_4bit

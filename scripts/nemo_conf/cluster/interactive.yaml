@@ -1,0 +1,3 @@
+# Minimal cluster config for local interactive runs.
+nodes: 1
+ntasks_per_node: 1
